@@ -13,18 +13,22 @@ parts that changed.
 
 | | |
 |---|---|
-| source | [nflverse](https://github.com/nflverse/nflverse-data) play-by-play + FTN charting |
+| source | [nflverse](https://github.com/nflverse/nflverse-data) play-by-play + FTN charting + participation |
 | rows | ~48,800 plays per season |
-| columns | 337 |
+| columns | 349 |
 | size | ~64 MB, **~15 MB gzipped** |
 
-Columns come from two places:
+Columns come from three places:
 
 * **nflverse play-by-play** — participants, situation, EPA, win probability, and
   the ~43 `*_player_id` columns that say who did what on each snap.
 * **FTN charting** (2022+, published free by nflverse) — play action, RPO,
   screen, motion, pressure counts, box count, drops, throwaways. Joined on
   `nflverse_game_id` + `nflverse_play_id`.
+* **Participation** (published by nflverse, FTN-sourced since 2023) — coverage
+  shell, man/zone, formation, offensive and defensive personnel, pressure, time
+  to throw, primary route. Joined on `nflverse_game_id` + `play_id`. nflverse
+  publishes a season only once it is over, so the newest season is empty.
 
 A `players` table maps `gsis_id` → `nfl_id` with position, team and a count of
 how many indexed plays each player appears in.

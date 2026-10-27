@@ -71,7 +71,8 @@ jobs:
           print("%d plays  ·  %d columns  ·  seasons %s"
                 % (m["rows"], m["columns"], ", ".join(map(str, m["seasons"]))))
           print()
-          print("Built from nflverse play-by-play plus FTN charting.")
+          print("Built from nflverse play-by-play plus FTN charting and participation;")
+          print("players from nflverse players.csv, filled from each season's roster.")
           print("Published as parts: one file per completed season, one per week of the")
           print("newest season, one for players. Consumers poll `manifest.json` and")
           print("download only the parts whose content id changed.")

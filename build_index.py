@@ -12,6 +12,11 @@ DATA = os.path.join(HERE, "data")
 DB = os.path.join(DATA, "plays.db")
 PBP = "https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_%d.csv.gz"
 PLAYERS = "https://github.com/nflverse/nflverse-data/releases/download/players_components/players.csv"
+# players.csv trails the league: on 2026-09-14 it still stopped at rookie_season
+# 2025 and was missing 148 of the 1,039 players in week 1 (Shough, Skattebo,
+# Jadarian Price...), so none of them could be searched. The season roster is
+# rebuilt as teams sign people and had all 148.
+ROSTER = "https://github.com/nflverse/nflverse-data/releases/download/rosters/roster_%d.csv"
 # FTN Fantasy's charting layer, published free by nflverse (2022+). Adds the
 # things the base feed cannot know: play action, RPO, screen, motion, pressure
 # counts, drops, throwaways.
@@ -25,21 +30,45 @@ FTN_COLS = ["starting_hash", "qb_location", "n_offense_backfield", "n_defense_bo
             "n_pass_rushers", "is_qb_fault_sack"]
 FTN_INT = {"n_offense_backfield", "n_defense_box", "n_blitzers", "n_pass_rushers"}
 
+# nflverse's participation release: coverage shell, formation, personnel,
+# pressure, time to throw. FTN charts it too (since 2023), but nflverse only
+# publishes a season once it is OVER -- on 2026-09-27 the 2025 file was up and
+# 2026 was a 404 -- so the newest season carries these columns empty. Left out:
+# ngs_air_yards (empty since 2024; air_yards replaces it) and the per-player
+# id/name/number lists, which would roughly double a season part.
+PARTICIPATION = ("https://github.com/nflverse/nflverse-data/releases/download/"
+                 "pbp_participation/pbp_participation_%d.csv")
+PART_COLS = ["offense_formation", "offense_personnel", "defense_personnel",
+             "defenders_in_box", "number_of_pass_rushers", "n_offense", "n_defense",
+             "time_to_throw", "was_pressure", "route", "defense_man_zone_type",
+             "defense_coverage_type"]
+PART_INT = {"defenders_in_box", "number_of_pass_rushers", "n_offense", "n_defense"}
+PART_REAL = {"time_to_throw"}
 
-def load_ftn(season):
-    """(game_id, play_id) -> charted values, or {} if that season isn't charted."""
-    path = os.path.join(DATA, "ftn_%d.csv" % season)
+# Layers joined onto each pbp row by (game_id, play_id), in column order.
+LAYERS = [
+    {"label": "FTN charting", "url": FTN, "file": "ftn_%d.csv", "cols": FTN_COLS,
+     "ints": FTN_INT, "reals": set(), "play": "nflverse_play_id"},
+    {"label": "participation", "url": PARTICIPATION, "file": "participation_%d.csv",
+     "cols": PART_COLS, "ints": PART_INT, "reals": PART_REAL, "play": "play_id"},
+]
+LAYER_COLS = [c for L in LAYERS for c in L["cols"]]
+
+
+def load_layer(layer, season):
+    """(game_id, play_id) -> the layer's values, or {} if that season isn't out."""
+    path = os.path.join(DATA, layer["file"] % season)
     try:
-        fetch(FTN % season, path)
+        fetch(layer["url"] % season, path)
     except Exception:
-        print("  no FTN charting for %d" % season)
+        print("  no %s for %d" % (layer["label"], season))
         return {}
     out = {}
     with open(path, newline="", encoding="utf-8", errors="replace") as f:
         for r in csv.DictReader(f):
-            key = (r.get("nflverse_game_id"), r.get("nflverse_play_id"))
+            key = (r.get("nflverse_game_id"), r.get(layer["play"]))
             row = []
-            for c in FTN_COLS:
+            for c in layer["cols"]:
                 v = (r.get(c) or "").strip()
                 if v in ("", "NA"):
                     row.append(None)
@@ -47,14 +76,18 @@ def load_ftn(season):
                     row.append("1")
                 elif v == "FALSE":
                     row.append("0")
-                elif c in FTN_INT:
+                elif c in layer["ints"]:
                     try: row.append(int(float(v)))
+                    except ValueError: row.append(None)
+                elif c in layer["reals"]:
+                    try: row.append(float(v))
                     except ValueError: row.append(None)
                 else:
                     row.append(v)
             out[key] = row
-    print("  FTN %d: %d charted plays" % (season, len(out)))
+    print("  %s %d: %d plays" % (layer["label"], season, len(out)))
     return out
+
 
 # identifiers must stay exact -- never floats, or 2025090400 becomes 2025090400.0
 FORCE_INT = {"play_id", "season", "week", "qtr", "down"}
@@ -134,13 +167,15 @@ def main(seasons, full=False):
         # mistaken for an integer one
         sample = [row for _, row in zip(range(20000), rd)]
     keep_idx = [i for i, c in enumerate(raw_header) if full or not SKIP.search(c)]
-    header = [raw_header[i] for i in keep_idx] + FTN_COLS
+    header = [raw_header[i] for i in keep_idx] + LAYER_COLS
     if not full:
         print("  dropping %d low-value columns (--full keeps them)"
               % (len(raw_header) - len(keep_idx)))
     types = {}
-    for col in FTN_COLS:
-        types[col] = "INTEGER" if col in FTN_INT else "TEXT"
+    for L in LAYERS:
+        for col in L["cols"]:
+            types[col] = ("INTEGER" if col in L["ints"] else
+                          "REAL" if col in L["reals"] else "TEXT")
     for col, src_i in zip(header, keep_idx):
         if col in FORCE_INT:
             types[col] = "INTEGER"
@@ -164,7 +199,11 @@ def main(seasons, full=False):
     with open(players_csv, newline="", encoding="utf-8") as f:
         rows = []
         for r in csv.DictReader(f):
-            if not r.get("gsis_id"):
+            # Plays name players by GSIS id (00-00xxxxx). players.csv also holds
+            # ~6,400 placeholders keyed by an ESB id instead (SHO768898); none
+            # can match a play, and once the roster fills in the real record
+            # they turn up as a second, empty Tyler Shough in the dropdown.
+            if not (r.get("gsis_id") or "").startswith("00-"):
                 continue
             # play descriptions use "W.Anderson"; older rows have no short_name,
             # so synthesise it the same way
@@ -177,16 +216,43 @@ def main(seasons, full=False):
     con.executemany("INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?)", rows)
     print("  players: %d" % len(rows))
 
+    # Fill in whoever players.csv has not caught up with, from each indexed
+    # season's roster. Only missing ids: where both know a player, players.csv
+    # is the richer record and stays.
+    known = {r[0] for r in rows}
+    for s in seasons:
+        path = os.path.join(DATA, "roster_%d.csv" % s)
+        try:
+            fetch(ROSTER % s, path)
+        except Exception:
+            print("  no roster for %d" % s)
+            continue
+        added = []
+        with open(path, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                gid = r.get("gsis_id")
+                if not gid or gid in known:
+                    continue
+                first, last = r.get("first_name") or "", r.get("last_name") or ""
+                short = "%s.%s" % (first[0], last) if first and last else ""
+                # the roster calls players.csv's nfl_id gsis_it_id (same values)
+                added.append((gid, r.get("gsis_it_id") or "", r.get("full_name") or ("%s %s" % (first, last)).strip(),
+                              short, r.get("position", ""), r.get("team", ""),
+                              r.get("jersey_number", ""), str(s), 0))
+                known.add(gid)
+        con.executemany("INSERT OR REPLACE INTO players VALUES (?,?,?,?,?,?,?,?,?)", added)
+        print("  roster %d: %d players not yet in players.csv" % (s, len(added)))
+
     ins = "INSERT INTO plays VALUES (%s)" % ",".join("?" * len(header))
     numidx = {header.index(c) for c in header if types[c] == "REAL"}
     intidx = {header.index(c) for c in header if types[c] == "INTEGER"}
     total = 0
     gid_i = raw_header.index("game_id")
     pid_i = raw_header.index("play_id")
-    blank = [None] * len(FTN_COLS)
     for season, p in zip(seasons, paths):
-        ftn = load_ftn(int(season))
-        n = matched = 0
+        layers = [(load_layer(L, int(season)), [None] * len(L["cols"])) for L in LAYERS]
+        n = 0
+        matched = [0] * len(LAYERS)
         with gzip.open(p, "rt", newline="", encoding="utf-8", errors="replace") as f:
             rd = csv.reader(f)
             head = next(rd)
@@ -197,10 +263,12 @@ def main(seasons, full=False):
                 if len(full_row) != len(raw_header):
                     continue
                 row = [full_row[i] for i in keep_idx]
-                chart = ftn.get((full_row[gid_i], full_row[pid_i]))
-                if chart:
-                    matched += 1
-                row = row + (chart or blank)
+                key = (full_row[gid_i], full_row[pid_i])
+                for i, (lay, blank) in enumerate(layers):
+                    got = lay.get(key)
+                    if got:
+                        matched[i] += 1
+                    row = row + (got or blank)
                 out = []
                 for i, v in enumerate(row):
                     if v is None or v in ("", "NA"):
@@ -223,7 +291,8 @@ def main(seasons, full=False):
                     con.executemany(ins, batch); n += len(batch); batch = []
             if batch:
                 con.executemany(ins, batch); n += len(batch)
-        print("  %s: %d rows (%d with FTN charting)" % (os.path.basename(p), n, matched))
+        print("  %s: %d rows (%s)" % (os.path.basename(p), n, ", ".join(
+            "%d with %s" % (m, L["label"]) for m, L in zip(matched, LAYERS))))
         total += n
 
     for idx, col in [("idx_game", "old_game_id"), ("idx_sw", "season"), ("idx_pos", "posteam"),
